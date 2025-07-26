@@ -1,0 +1,6 @@
+{
+    "bin_1": {"bin_id": "bin_1", "location": [51.96, 7.62], "fill_level": 30, "last_emptied_days": 3},
+    "bin_2": {"bin_id": "bin_2", "location": [51.97, 7.63], "fill_level": 85, "last_emptied_days": 8},
+    "bin_3": {"bin_id": "bin_3", "location": [51.95, 7.61], "fill_level": 75, "last_emptied_days": 1}
+  }
+  
