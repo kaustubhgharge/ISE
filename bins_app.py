@@ -2,17 +2,20 @@ import random
 import threading
 import time
 import os
-from flask import Flask, jsonify, request, abort, send_from_directory, render_template
+from flask import Flask, jsonify, request, abort, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from math import radians, cos, sin, sqrt, atan2
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bins.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ECHO'] = False  # Disable SQL logs
+
 db = SQLAlchemy(app)
 CORS(app)
 
-
+# --- Models ---
 class Bin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     location = db.Column(db.String(100))
@@ -24,6 +27,7 @@ class Bin(db.Model):
     status = db.Column(db.String(20))
 
 
+# --- Database Initialization ---
 def init_db():
     db.drop_all()
     db.create_all()
@@ -70,6 +74,7 @@ def init_db():
     db.session.commit()
 
 
+# --- Status Updater ---
 def update_bin_statuses(thresholds):
     bins = Bin.query.all()
     for bin in bins:
@@ -83,9 +88,12 @@ def update_bin_statuses(thresholds):
             bin.status = 'ok'
     db.session.commit()
 
+
+# --- Routes ---
 @app.route("/")
 def serve_dashboard():
     return render_template("dashboard.html")
+
 
 @app.route('/api/bins')
 def get_bins():
@@ -144,44 +152,15 @@ def collect_bins():
             bin.status = 'ok'
             collected.append(bin_id)
 
-    if not collected:
-        return jsonify({'error': 'No valid bin ids found'}), 404
+    if collected:
+        db.session.commit()
 
-    db.session.commit()
     return jsonify({'message': 'Bins collected and reset', 'collected_bins': collected})
 
 
-def auto_randomize_fill():
-    with app.app_context():
-        while True:
-            bins = Bin.query.filter(Bin.type != 'HUB').all()
-            for bin in bins:
-                bin.fill = random.randint(0, 100)
-                bin.last_emptied_days_ago += random.randint(0, 1)
-            db.session.commit()
-            time.sleep(30)
-
-
-# @app.route("/")
-# def serve_dashboard():
-#     return send_from_directory(os.path.dirname(os.path.abspath(__file__)), 'dashboard.html')
-from math import radians, cos, sin, sqrt, atan2
-
-def calculate_distance(a, b):
-    # Haversine formula to calculate distance (km) between two bins
-    R = 6371  # Earth radius in km
-    lat1, lon1 = radians(a.lat), radians(a.lon)
-    lat2, lon2 = radians(b.lat), radians(b.lon)
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a_ = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
-    c = 2 * atan2(sqrt(a_), sqrt(1 - a_))
-    return R * c
-
 @app.route("/api/optimized_route")
 def optimized_route():
-    # Get bins that need collection (full, nearly_full & inactive)
-    bins = Bin.query.filter(Bin.status.in_(["full", "nearly_full","inactive"])).all()
+    bins = Bin.query.filter(Bin.status.in_(["full", "nearly_full", "inactive"])).all()
     hub = Bin.query.get(0)
     if not bins or not hub:
         return jsonify({"path": []})
@@ -191,7 +170,6 @@ def optimized_route():
     visited = set()
 
     while len(visited) < len(bins):
-        # Find nearest unvisited bin
         nearest_bin = min(
             (b for b in bins if b.id not in visited),
             key=lambda b: calculate_distance(current, b),
@@ -203,10 +181,9 @@ def optimized_route():
         visited.add(nearest_bin.id)
         current = nearest_bin
 
-    # Return to HUB
     path.append([hub.lat, hub.lon])
-
     return jsonify({"path": path})
+
 
 @app.route('/bin/<int:bin_id>')
 def show_bin(bin_id):
@@ -216,9 +193,36 @@ def show_bin(bin_id):
     return render_template('bin_detail.html', bin=bin)
 
 
+# --- Haversine Distance ---
+def calculate_distance(a, b):
+    R = 6371
+    lat1, lon1 = radians(a.lat), radians(a.lon)
+    lat2, lon2 = radians(b.lat), radians(b.lon)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a_ = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+    c = 2 * atan2(sqrt(a_), sqrt(1 - a_))
+    return R * c
 
+
+# --- Randomizer (Runs in Background) ---
+def auto_randomize_fill():
+    while True:
+        with app.app_context():
+            try:
+                bins = Bin.query.filter(Bin.type != 'HUB').all()
+                for bin in bins:
+                    bin.fill = random.randint(0, 100)
+                    bin.last_emptied_days_ago += random.randint(0, 1)
+                db.session.commit()
+            except:
+                db.session.rollback()
+        time.sleep(30)
+
+
+# --- App Startup ---
 if __name__ == '__main__':
     with app.app_context():
         init_db()
     threading.Thread(target=auto_randomize_fill, daemon=True).start()
-    app.run(debug=True)
+    app.run(debug=False)
