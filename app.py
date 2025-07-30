@@ -1,93 +1,103 @@
-from flask import Flask, render_template, request, jsonify
-from flask_socketio import SocketIO
-import json
+import sqlite3
+from flask import Flask, jsonify, render_template, request
+import threading
 import time
-from ortools.constraint_solver import routing_enums_pb2, pywrapcp
+import random
 
 app = Flask(__name__)
-socketio = SocketIO(app)
 
-with open('bins_data.json') as f:
-    bins_data = json.load(f)
+DB_PATH = 'bins.db'
 
-last_alert_times = {}
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # So we can access columns by name
+    return conn
 
-ALERT_THRESHOLD = 80
-COOLDOWN = 5 * 60 * 60
+def update_bin_statuses(thresholds):
+    conn = get_db_connection()
+    bins = conn.execute('SELECT * FROM bins').fetchall()
+    for bin in bins:
+        status = 'ok'
+        if bin['last_emptied_days_ago'] > thresholds['inactive']:
+            status = 'inactive'
+        elif bin['fill'] >= thresholds['full']:
+            status = 'full'
+        elif bin['fill'] >= thresholds['nearly_full']:
+            status = 'nearly_full'
+        # Update status in DB
+        conn.execute('UPDATE bins SET status = ? WHERE id = ?', (status, bin['id']))
+    conn.commit()
+    conn.close()
 
-def check_and_alert(bin_data):
-    bin_id = bin_data['bin_id']
-    fill_level = bin_data['fill_level']
-    current_time = time.time()
-
-    last_alert = last_alert_times.get(bin_id, 0)
-    if fill_level >= ALERT_THRESHOLD and (current_time - last_alert) > COOLDOWN:
-        alert_msg = f"⚠️ ALERT: Bin {bin_id} is nearly full at {fill_level}%!"
-        last_alert_times[bin_id] = current_time
-        socketio.emit('alert', {'message': alert_msg})
-        return True
-    return False
+def randomize_fill_levels():
+    conn = get_db_connection()
+    bins = conn.execute('SELECT * FROM bins WHERE type != "HUB"').fetchall()
+    for bin in bins:
+        new_fill = random.randint(0, 100)
+        conn.execute('UPDATE bins SET fill = ? WHERE id = ?', (new_fill, bin['id']))
+    conn.commit()
+    conn.close()
 
 @app.route('/')
 def index():
-    return render_template('index.html', bins=bins_data)
+    return render_template('dashboard.html')
 
-@app.route('/sensor-data', methods=['POST'])
-def sensor_data():
-    data = request.json
-    bin_id = data['bin_id']
-    bins_data[bin_id] = data
-    check_and_alert(data)
-    return jsonify({'status': 'success'})
+@app.route('/api/bins')
+def get_bins():
+    thresholds = {
+        'full': int(request.args.get('full', 80)),
+        'nearly_full': int(request.args.get('nearly_full', 60)),
+        'inactive': int(request.args.get('inactive', 5))
+    }
+    update_bin_statuses(thresholds)
+    conn = get_db_connection()
+    bins = conn.execute('SELECT * FROM bins').fetchall()
+    bins_list = [dict(bin) for bin in bins]
+    conn.close()
+    return jsonify(bins_list)
 
-@app.route('/generate-route')
-def generate_route():
-    full_bins = [b for b in bins_data.values() if b['fill_level'] >= ALERT_THRESHOLD]
+@app.route('/api/collect', methods=['POST'])
+def collect_bins():
+    bin_ids = request.json.get('bin_ids', [])
+    conn = get_db_connection()
+    for bin_id in bin_ids:
+        conn.execute('''
+            UPDATE bins SET fill = 0, last_emptied_days_ago = 0, status = 'ok' WHERE id = ?
+        ''', (bin_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Bins collected and reset'})
 
-    if not full_bins:
-        return jsonify({'route': [], 'message': 'No bins need collection'})
+@app.route('/api/optimized_route')
+def get_route():
+    conn = get_db_connection()
+    hub = conn.execute('SELECT * FROM bins WHERE type = "HUB"').fetchone()
+    if not hub:
+        return jsonify({'error': 'HUB not found'}), 400
 
-    locations = [b['location'] for b in full_bins]
+    to_visit = conn.execute('''
+        SELECT * FROM bins WHERE status IN ("full", "nearly_full", "inactive") AND type != "HUB"
+    ''').fetchall()
 
-    def compute_distance_matrix(locations):
-        distances = {}
-        for i, loc_i in enumerate(locations):
-            distances[i] = {}
-            for j, loc_j in enumerate(locations):
-                if i == j:
-                    distances[i][j] = 0
-                else:
-                    distances[i][j] = int(((loc_i[0] - loc_j[0])**2 + (loc_i[1] - loc_j[1])**2)**0.5 * 100000)
-        return distances
+    path = [[hub['lat'], hub['lon']]] + [[b['lat'], b['lon']] for b in to_visit] + [[hub['lat'], hub['lon']]]
 
-    distance_matrix = compute_distance_matrix(locations)
+    conn.close()
+    return jsonify({'path': path})
 
-    manager = pywrapcp.RoutingIndexManager(len(locations), 1, 0)
-    routing = pywrapcp.RoutingModel(manager)
+@app.route('/bin/<int:bin_id>')
+def bin_detail(bin_id):
+    conn = get_db_connection()
+    bin_data = conn.execute('SELECT * FROM bins WHERE id = ?', (bin_id,)).fetchone()
+    conn.close()
+    if not bin_data or bin_data['type'] == 'HUB':
+        return "Bin not found", 404
+    return render_template('bin_detail.html', bin=bin_data)
 
-    def distance_callback(from_index, to_index):
-        from_node = manager.IndexToNode(from_index)
-        to_node = manager.IndexToNode(to_index)
-        return distance_matrix[from_node][to_node]
-
-    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-
-    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-    search_parameters.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
-
-    solution = routing.SolveWithParameters(search_parameters)
-
-    route_order = []
-    if solution:
-        index = routing.Start(0)
-        while not routing.IsEnd(index):
-            node = manager.IndexToNode(index)
-            route_order.append(full_bins[node]['bin_id'])
-            index = solution.Value(routing.NextVar(index))
-
-    return jsonify({'route': route_order})
+def auto_randomize_fill():
+    while True:
+        randomize_fill_levels()
+        time.sleep(30)
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    threading.Thread(target=auto_randomize_fill, daemon=True).start()
+    app.run(debug=True)
