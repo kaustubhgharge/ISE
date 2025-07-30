@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>IoT-Based Waste Management Alert System</title>
+  <title>IoT-Based Waste Management Dashboard</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
   <style>
@@ -12,15 +12,11 @@
     .status-inactive { background-color: #cce5ff; }
     .status-ok { background-color: #ccffcc; }
     .bin-details { display: none; }
-    button, select {
-      margin-right: 15px;
-      margin-bottom: 10px;
-    }
+    button, select { margin-right: 15px; margin-bottom: 10px; }
   </style>
 </head>
 <body class="container py-4">
-
-  <h2>IoT-Based Waste Management Alert System</h2>
+  <h2>IoT-Based Waste Management Dashboard</h2>
 
   <!-- Threshold Sliders -->
   <div class="row mb-3">
@@ -42,19 +38,18 @@
   </div>
 
   <!-- Controls -->
-  <button class="btn btn-success" onclick="showRoute()"> Optimized Route</button>
+  <button class="btn btn-success" onclick="showRoute()">Optimized Route</button>
   <button class="btn btn-info" onclick="openGoogleMapsRoute()">View in Google Maps</button>
+  <button class="btn btn-warning" onclick="simulateReport()">Mark OK</button>
 
   <div class="mb-3">
     <select id="bin-select" multiple class="form-select w-25"></select>
   </div>
 
-  <button class="btn btn-warning" onclick="simulateReport()">Mark OK</button>
-
   <!-- Map -->
   <div id="map" class="my-3"></div>
 
-  <!-- Bin Tabs -->
+  <!-- Bin Buttons -->
   <div class="row row-cols-auto g-2 mb-3">
     {% for bin in range(1, 21) %}
       <div class="col">
@@ -66,7 +61,7 @@
   <!-- Bin Cards -->
   <div id="bin-cards" class="row d-none"></div>
 
-  <!-- 🚨 Bin Alerts Sidebar -->
+  <!-- Alert Sidebar -->
   <div class="position-fixed top-0 end-0 p-3" style="width: 300px; z-index: 1050;">
     <div class="card">
       <div class="card-header bg-danger text-white">🚨 Bin Alerts</div>
@@ -78,11 +73,10 @@
 
   <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-
   <script>
     let map = L.map("map").setView([52.03, 8.89], 14);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
-    let markers = [], routeLine, currentRoute = [];
+    let markers = [], routeLine = null, currentRoute = [];
 
     function getThresholds() {
       return {
@@ -101,11 +95,18 @@
     ["full-threshold", "nearly-threshold", "inactive-threshold"].forEach(id => {
       document.getElementById(id).addEventListener("input", () => {
         updateThresholdLabels();
-        loadBins();
+        loadBins(); // Reset route on threshold change
       });
     });
 
     function loadBins() {
+      // Reset route line if any
+      if (routeLine) {
+        map.removeLayer(routeLine);
+        routeLine = null;
+        currentRoute = [];
+      }
+
       const t = getThresholds();
       fetch(`/api/bins?full=${t.full}&nearly_full=${t.nearly_full}&inactive=${t.inactive}`)
         .then(res => res.json())
@@ -113,10 +114,6 @@
           updateMapAndUI(bins);
           updateBinButtons(bins);
         });
-    }
-
-    function reloadBins() {
-      fetch("/api/reload", { method: "POST" }).then(() => loadBins());
     }
 
     function simulateReport() {
@@ -163,10 +160,10 @@
 
       bins.forEach(bin => {
         if (bin.id !== 0) {
-          let option = document.createElement("option");
-          option.value = bin.id;
-          option.text = `Bin ${bin.id} (${bin.status})`;
-          binSelect.appendChild(option);
+          const opt = document.createElement("option");
+          opt.value = bin.id;
+          opt.text = `Bin ${bin.id} (${bin.status})`;
+          binSelect.appendChild(opt);
         }
 
         if (bin.status === "full") fullBins.push(bin.id);
@@ -224,8 +221,7 @@
         const btn = document.getElementById(`bin-tab-${bin.id}`);
         if (btn) {
           btn.className = 'btn btn-sm w-100'; // Reset
-          const colorClass = statusClasses[bin.status] || 'btn-outline-primary';
-          btn.classList.add(colorClass);
+          btn.classList.add(statusClasses[bin.status] || 'btn-outline-primary');
         }
       });
     }
@@ -238,6 +234,7 @@
     updateThresholdLabels();
     loadBins();
 
+    // Auto-refresh and clear route
     setInterval(() => {
       fetch('/api/randomize_bins', { method: 'POST' }).then(() => loadBins());
     }, 30000);
